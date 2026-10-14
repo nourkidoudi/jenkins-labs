@@ -198,3 +198,44 @@ Job `deploy_springboot` qui automatise tout, du build au déploiement :
 - **Source Code Management :** dépôt `Jenkins-Demo` (fork), branche `*/main`
 - **Build Environment :** *Use secret text(s) or file(s)* avec l'identifiant Docker Hub (`DOCKER_USER` / `DOCKER_PASS`)
 - **Execute shell :**
+
+```bash
+set -e
+mvn clean package -DskipTests
+IMAGE=$DOCKER_USER/springapp:$BUILD_NUMBER
+docker build -t $IMAGE .
+echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+docker push $IMAGE
+sed "s|IMAGE_PLACEHOLDER|$IMAGE|" deployment.yaml | kubectl apply -f -
+kubectl apply -f service.yaml
+kubectl rollout status deployment/spring-app-deployment --timeout=180s
+```
+
+Dans `deployment.yaml` du dépôt, l'image est `IMAGE_PLACEHOLDER` : Jenkins la remplace à chaque build par l'image qu'il vient de construire (`nourki2003/springapp:<numéro du build>`), ce qui force Kubernetes à déployer la nouvelle version.
+
+![Console du job deploy_springboot](06-deploy-console.png)
+
+Vérification sur la VM :
+
+```bash
+kubectl get pods,svc
+curl http://localhost:30222
+```
+
+![Pods et service après le déploiement Jenkins](07-deploy-k8s.png)
+
+---
+
+## Problèmes rencontrés et solutions
+
+| Problème | Cause | Solution |
+|---|---|---|
+| `kubectl` interrogeait Jenkins (« Authentication required ») | Aucun fichier de configuration de cluster : `kubectl` essayait `localhost:8080` | Copie de `/etc/rancher/k3s/k3s.yaml` vers `~/.kube/config` |
+| `curl: Empty reply from server` | Spring Boot n'avait pas fini de démarrer | Attendre le message `Tomcat started on port(s): 2222` dans `docker logs` |
+| Pods en `InvalidImageName` | Le nom d'image du `deployment.yaml` était invalide (placeholder non remplacé) | Correction de la ligne `image:` puis `kubectl apply` |
+| Pod bloqué en `ContainerCreating` | K3s utilise containerd et doit télécharger l'image lui-même | `sudo k3s crictl pull nourki2003/springapp:1.0` puis recréation du déploiement |
+| Build Jenkins très lent | Jenkins retéléchargeait toutes les dépendances Maven avec un réseau lent | Copie du cache `~/.m2/repository` vers `/var/lib/jenkins/.m2` |
+
+## Conclusion
+
+Ce lab a permis de construire une chaîne complète pour une application Spring Boot : build Maven, conteneurisation avec Docker, publication sur Docker Hub et déploiement sur K3s, d'abord manuellement, puis automatisé avec un job Jenkins Freestyle qui déclenche tout le processus à partir du code sur GitHub.
