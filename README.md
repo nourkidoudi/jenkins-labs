@@ -13,8 +13,7 @@
 ## Sommaire
 
 - [Lab 1 – Jenkins CI/CD Pipeline](#lab-1--jenkins-cicd-pipeline)
-- Lab 2 – Prise en main et utilisation de Jenkins (à venir)
-
+- [Lab 2 – Prise en main et utilisation de Jenkins](#lab-2--prise-en-main-et-utilisation-de-jenkins)
 ---
 
 # Lab 1 – Jenkins CI/CD Pipeline
@@ -239,3 +238,124 @@ curl http://localhost:30222
 ## Conclusion
 
 Ce lab a permis de construire une chaîne complète pour une application Spring Boot : build Maven, conteneurisation avec Docker, publication sur Docker Hub et déploiement sur K3s, d'abord manuellement, puis automatisé avec un job Jenkins Freestyle qui déclenche tout le processus à partir du code sur GitHub.
+
+
+---
+
+# Lab 2 – Prise en main et utilisation de Jenkins
+
+## Objectif
+
+Construire un pipeline CI/CD avec un `Jenkinsfile` : clonage du dépôt, build Maven, construction de l'image Docker puis déploiement du conteneur, le tout exécuté par Jenkins.
+
+## 1. Configuration de Jenkins
+
+### Plugins
+
+Plugins utilisés : **Kubernetes CLI**, **Maven Integration**, **Docker** (avec Docker Commons). Le plugin Docker Commons était nécessaire pour faire apparaître la section Docker dans la configuration des outils.
+
+### Outils (Administrer Jenkins → Outils)
+
+Les trois outils sont déclarés avec des chemins locaux, car Java, Maven et Docker sont déjà installés sur la VM :
+
+| Outil | Nom | Chemin |
+|---|---|---|
+| JDK | `JDK` | `/usr/lib/jvm/java-21-openjdk-amd64` |
+| Maven | `maven-3` | `/usr/share/maven` |
+| Docker | `MyDocker` | `/usr` |
+
+Le téléchargement automatique (*Install automatically*) a été désactivé : le JDK Oracle demande un compte Oracle, et Maven comme Docker sont déjà présents sur la VM, ce qui évite aussi de longs téléchargements.
+
+![Configuration des outils](08-lab2-outils.png)
+
+## 2. Le Jenkinsfile
+
+Fichier à la racine du dépôt `Jenkins-Demo` (fork). L'ancien `Jenkinsfile` du projet a été conservé sous le nom `Jenkinsfile.original`.
+
+```groovy
+node {
+    def mvnHome = tool 'maven-3'
+    def dockerImageTag = "devopsexample:${env.BUILD_NUMBER}"
+
+    stage('Clone Repo') {
+        git branch: 'main', url: 'https://github.com/nourkidoudi/Jenkins-Demo.git'
+    }
+
+    stage('Build Project') {
+        sh "${mvnHome}/bin/mvn clean package -DskipTests"
+    }
+
+    stage('Initialize Docker') {
+        def dockerHome = tool 'MyDocker'
+        env.PATH = "${dockerHome}/bin:${env.PATH}"
+    }
+
+    stage('Build Docker Image') {
+        sh "docker build -t ${dockerImageTag} ."
+    }
+
+    stage('Deploy Docker Image') {
+        echo "Docker Image Tag Name: ${dockerImageTag}"
+        sh "docker rm -f devopsexample || true"
+        sh "docker run --name devopsexample -d -p 2222:2222 ${dockerImageTag}"
+    }
+}
+```
+
+Explication des stages :
+
+1. **Clone Repo** : récupère le code depuis GitHub.
+2. **Build Project** : compile et empaquette l'application avec Maven.
+3. **Initialize Docker** : ajoute le dossier de l'outil `MyDocker` au `PATH`.
+4. **Build Docker Image** : construit l'image `devopsexample:<numéro du build>`.
+5. **Deploy Docker Image** : supprime l'ancien conteneur s'il existe, puis lance le nouveau sur le port 2222.
+
+Le `docker rm -f ... || true` rend le pipeline relançable sans erreur « nom de conteneur déjà utilisé ».
+
+Dockerfile utilisé (celui du Lab 1) :
+
+```dockerfile
+FROM eclipse-temurin:17-jre
+EXPOSE 2222
+WORKDIR /app
+COPY target/*.jar app.jar
+CMD ["java", "-jar", "app.jar"]
+```
+
+## 3. Création du pipeline
+
+Nouveau Item `Jenkins_test`, type **Pipeline** :
+
+- **GitHub project** : `https://github.com/nourkidoudi/Jenkins-Demo`
+- **Definition** : *Pipeline script from SCM*
+- **SCM** : Git, dépôt `https://github.com/nourkidoudi/Jenkins-Demo.git`, branche `*/main`
+- **Script Path** : `Jenkinsfile`
+
+## 4. Exécution
+
+Lancement avec **Lancer un build**. La Stage View affiche tous les stages en vert.
+
+![Stage View du pipeline](09-lab2-stage-view.png)
+
+Vérification sur la VM :
+
+```bash
+docker ps | grep devopsexample
+curl http://localhost:2222
+```
+
+![Conteneur en cours d'exécution et réponse de l'application](10-lab2-docker-ps-curl.png)
+
+L'application répond sur le port 2222.
+
+## Problèmes rencontrés et solutions
+
+| Problème | Cause | Solution |
+|---|---|---|
+| Section Docker absente dans les outils | Plugin Docker Commons non installé | Installation des plugins Docker puis redémarrage de Jenkins |
+| `curl: Failed to connect` sur le port 2222 | Le conteneur était arrêté (`Exited (255)`) après l'extinction de la VM | `docker start devopsexample`, ou relance du pipeline |
+| Jenkinsfile de l'énoncé non utilisable tel quel | Guillemets typographiques dans la ligne `git`, Dockerfile avec `COPY ... /app` et `CMD /app.jar` | Syntaxe corrigée, Dockerfile du Lab 1 conservé |
+
+## Conclusion
+
+Le pipeline Jenkins automatise toute la chaîne : récupération du code, build Maven, construction de l'image Docker et déploiement du conteneur. Contrairement au job Freestyle du Lab 1, tout le processus est décrit dans un `Jenkinsfile` versionné avec le code.
